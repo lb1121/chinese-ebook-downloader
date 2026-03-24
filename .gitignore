@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+*.pyo
+.DS_Store
+_progress.json
+*.pdf
+*.epub
+*.mobi
+*.azw3
+*.zip
+node_modules/
