@@ -398,35 +398,44 @@ def download_with_curl(url: str, output_path: str) -> bool:
     return result.returncode == 0
 
 
-def extract_zip(zip_path: str, output_dir: str) -> list[str]:
+def extract_zip(zip_path: str, output_dir: str, preferred_ext: str = "any") -> list[str]:
     """
     Extract ZIP file with GBK encoding fix for Chinese filenames.
 
     Python's zipfile uses CP437 by default, but Chinese filenames are GBK encoded.
     We need to decode from CP437 back to bytes, then decode as GBK.
+
+    Args:
+        preferred_ext: Preferred format extension (without dot). "any" extracts all files.
+    Returns:
+        List of extracted file paths.
     """
     extracted_files = []
+    ext_dot = f".{preferred_ext}" if preferred_ext != "any" else None
 
     with zipfile.ZipFile(zip_path, 'r') as zf:
         for info in zf.infolist():
+            if info.is_dir():
+                continue
+
             # Fix GBK encoding: cp437 -> bytes -> gbk
             try:
-                # Try to fix the filename encoding
                 fixed_name = info.filename.encode('cp437').decode('gbk')
             except (UnicodeDecodeError, UnicodeEncodeError):
-                # If that fails, try other common encodings
                 try:
                     fixed_name = info.filename.encode('cp437').decode('utf-8')
                 except:
-                    fixed_name = info.filename  # Keep original if all else fails
+                    fixed_name = info.filename
 
             # Sanitize the filename
             fixed_name = sanitize_filename(fixed_name)
 
-            # Update the filename in the info object
-            info.filename = fixed_name
+            # Format filter
+            if ext_dot and not fixed_name.lower().endswith(ext_dot):
+                print(f"  Skipped (not {preferred_ext}): {fixed_name}")
+                continue
 
-            # Extract
+            info.filename = fixed_name
             zf.extract(info, output_dir)
             extracted_path = os.path.join(output_dir, fixed_name)
             extracted_files.append(extracted_path)
@@ -457,7 +466,8 @@ async def download_book(
     output_dir: str = ".",
     ctfile_url: str = "",
     password: str = DEFAULT_PASSWORD,
-    headless: bool = True
+    headless: bool = True,
+    preferred_format: str = "pdf"
 ) -> dict:
     """
     Download a single book.
@@ -515,12 +525,14 @@ async def download_book(
         result = subprocess.run(['file', zip_path], capture_output=True, text=True)
         if 'zip archive' in result.stdout.lower():
             # Extract ZIP
-            print(f"Extracting ZIP...")
-            extracted_files = extract_zip(zip_path, output_dir)
+            print(f"Extracting ZIP (preferred: {preferred_format})...")
+            extracted_files = extract_zip(zip_path, output_dir, preferred_ext=preferred_format)
 
             # Filter to ebook formats only
-            ebook_files = [f for f in extracted_files
-                          if f.lower().endswith(('.pdf', '.epub', '.mobi', '.azw', '.azw3'))]
+            ebook_exts = ('.pdf', '.epub', '.mobi', '.azw', '.azw3')
+            if preferred_format != 'any':
+                ebook_exts = (f'.{preferred_format}',)
+            ebook_files = [f for f in extracted_files if f.lower().endswith(ebook_exts)]
 
             if ebook_files:
                 total_size = sum(os.path.getsize(f) for f in ebook_files) / 1024 / 1024
@@ -549,6 +561,8 @@ async def main():
     parser.add_argument('--ctfile-url', default='', help='Direct file host URL (skip search)')
     parser.add_argument('--password', default=DEFAULT_PASSWORD, help='File host password')
     parser.add_argument('--no-headless', action='store_true', help='Show browser window')
+    parser.add_argument('--format', default='pdf', choices=['pdf', 'epub', 'mobi', 'azw3', 'any'],
+                        help='Preferred format (default: pdf)')
     args = parser.parse_args()
 
     os.makedirs(args.output_dir, exist_ok=True)
@@ -559,7 +573,8 @@ async def main():
         output_dir=args.output_dir,
         ctfile_url=args.ctfile_url,
         password=args.password,
-        headless=not args.no_headless
+        headless=not args.no_headless,
+        preferred_format=args.format
     )
 
     if result['status'] == 'done':

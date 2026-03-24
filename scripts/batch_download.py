@@ -31,6 +31,25 @@ def sanitize_filename(name: str) -> str:
     return name[:200]
 
 
+def detect_format_from_files(files: list) -> str:
+    """Detect the format(s) of extracted ebook files. Returns 'pdf', 'epub', etc. or 'unknown'."""
+    formats = set()
+    for f in files:
+        ext = Path(f).suffix.lower().lstrip('.')
+        if ext in ('pdf', 'epub', 'mobi', 'azw3'):
+            formats.add(ext.upper())
+    return ', '.join(sorted(formats)) if formats else 'unknown'
+
+
+def sanitize_filename(name: str) -> str:
+    """Clean filename for filesystem."""
+    name = re.sub(r'[\[\]【】（）()《》]', '', name)
+    name = re.sub(r'[：:]', ' -', name)
+    name = re.sub(r'[\\/:*?"<>|]', ' ', name)
+    name = re.sub(r'\s+', ' ', name).strip()
+    return name[:200]
+
+
 def load_progress(output_dir: str) -> dict:
     """Load progress file."""
     progress_file = os.path.join(output_dir, '_progress.json')
@@ -76,7 +95,7 @@ def verify_file(filepath: str) -> bool:
     return any(t in output for t in valid_types) or size > 1024 * 1024  # >1MB is likely valid
 
 
-async def download_from_secondary(title: str, author: str, output_dir: str) -> dict:
+async def download_from_secondary(title: str, author: str, output_dir: str, preferred_format: str = "pdf") -> dict:
     """Try secondary book source. Returns {"status": "done"|"failed", ...}"""
     try:
         search_fn = search_secondary_source
@@ -108,16 +127,19 @@ async def download_from_secondary(title: str, author: str, output_dir: str) -> d
     if not success:
         return {"status": "failed", "error": "curl download failed (secondary)"}
 
-    # Try to extract ZIP
+    # Try to extract ZIP with format filter
     try:
-        extracted = extract_zip(output_path, output_dir)
+        extracted = extract_zip(output_path, output_dir, preferred_ext=preferred_format)
         os.remove(output_path)
-        # Find ebook files
         ebook_exts = ('.pdf', '.epub', '.mobi', '.azw3')
+        if preferred_format != 'any':
+            ebook_exts = (f'.{preferred_format}',)
         ebook_files = [f for f in extracted if f.lower().endswith(ebook_exts)]
         if ebook_files:
             return {"status": "done", "files": ebook_files, "source": "secondary"}
-        return {"status": "done", "files": extracted, "source": "secondary"}
+        # Files extracted but none match preferred format
+        fmt = detect_format_from_files(extracted)
+        return {"status": "format_mismatch", "available_formats": fmt, "source": "secondary", "files": extracted}
     except Exception:
         os.remove(output_path) if os.path.exists(output_path) else None
         return {"status": "failed", "error": "ZIP extraction failed (secondary)"}
@@ -129,43 +151,70 @@ async def download_from_tertiary(title: str, author: str, output_dir: str) -> di
     return {"status": "failed", "error": "Tertiary source not configured"}
 
 
-async def download_book(title: str, author: str, output_dir: str) -> dict:
-    """Download a single book with multi-source fallback."""
+async def download_book(title: str, author: str, output_dir: str, preferred_format: str = "pdf") -> dict:
+    """Download a single book with multi-source fallback and format awareness."""
     clean_title = sanitize_filename(f"{title} - {author}" if author else title)
 
-    # Check if already downloaded
-    for ext in ('.pdf', '.epub', '.mobi', '.azw3'):
-        p = os.path.join(output_dir, f"{clean_title}{ext}")
+    # Check if already downloaded (only for the preferred format)
+    if preferred_format != 'any':
+        p = os.path.join(output_dir, f"{clean_title}.{preferred_format}")
         if os.path.exists(p) and os.path.getsize(p) > 1024:
-            return {"status": "done", "message": "Already exists"}
+            return {"status": "done", "message": "Already exists", "source": "cache"}
+    else:
+        for ext in ('.pdf', '.epub', '.mobi', '.azw3'):
+            p = os.path.join(output_dir, f"{clean_title}{ext}")
+            if os.path.exists(p) and os.path.getsize(p) > 1024:
+                return {"status": "done", "message": "Already exists", "source": "cache"}
 
     print(f"\n{'='*60}")
     print(f"📚 {title} - {author}")
     print(f"{'='*60}")
 
+    available_formats = []  # Track what formats each source has
+
     # Source 1: Primary online library
     try:
         _dl = _import_download_book
         download_from_primary = _dl()[0]
-        print(f"  🔍 Trying primary source...")
-        result = await download_from_primary(title=title, author=author, output_dir=output_dir)
+        print(f"  🔍 Trying primary source (preferred: {preferred_format})...")
+        result = await download_from_primary(title=title, author=author, output_dir=output_dir, preferred_format=preferred_format)
         if result.get('status') == 'done':
             result["source"] = "primary"
             return result
-        print(f"  ❌ Primary failed: {result.get('error', '?')}")
+        if result.get('status') == 'format_mismatch':
+            fmt = result.get('available_formats', 'unknown')
+            available_formats.append(f"{fmt} (primary)")
+            print(f"  ⚠️  Primary has wrong format: {fmt}")
+        else:
+            print(f"  ❌ Primary failed: {result.get('error', '?')}")
     except Exception as e:
         print(f"  ❌ Primary source error: {e}")
 
     # Source 2: Secondary source
-    print(f"  🔍 Trying secondary source...")
-    result = await download_from_secondary(title, author, output_dir)
+    print(f"  🔍 Trying secondary source (preferred: {preferred_format})...")
+    result = await download_from_secondary(title, author, output_dir, preferred_format=preferred_format)
     if result.get('status') == 'done':
         return result
-    print(f"  ❌ Secondary failed: {result.get('error', '?')}")
+    if result.get('status') == 'format_mismatch':
+        fmt = result.get('available_formats', 'unknown')
+        available_formats.append(f"{fmt} (secondary)")
+        print(f"  ⚠️  Secondary has wrong format: {fmt}")
+    else:
+        print(f"  ❌ Secondary failed: {result.get('error', '?')}")
 
     # Source 3: Tertiary source
     result = await download_from_tertiary(title, author, output_dir)
-    return result
+    if result.get('status') == 'done':
+        return result
+
+    # Build failure message
+    if available_formats and preferred_format != 'any':
+        msg = f"No {preferred_format.upper()} available for this book. Sources returned: {', '.join(available_formats)}"
+    elif result.get('error'):
+        msg = result['error']
+    else:
+        msg = "All sources failed"
+    return {"status": "failed", "error": msg}
 
 
 async def main():
@@ -176,6 +225,8 @@ async def main():
     parser.add_argument('--output-dir', required=True, help='Output directory')
     parser.add_argument('--start', type=int, default=0, help='Start index (0-based)')
     parser.add_argument('--limit', type=int, default=0, help='Max books to download (0=all)')
+    parser.add_argument('--format', default='pdf', choices=['pdf', 'epub', 'mobi', 'azw3', 'any'],
+                        help='Preferred format (default: pdf)')
     args = parser.parse_args()
     
     # Load book list
@@ -206,7 +257,7 @@ async def main():
         # Skip previously failed (will retry)
         # Allow retry for 'failed' and 'retry' status
         
-        result = await download_book(title, author, args.output_dir)
+        result = await download_book(title, author, args.output_dir, preferred_format=args.format)
         
         # Save progress
         progress[key] = result['status']

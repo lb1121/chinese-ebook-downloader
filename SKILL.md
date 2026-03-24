@@ -18,14 +18,17 @@ Download Chinese ebooks from online book libraries via file hosting services.
 ## Quick Start
 
 ```bash
-# Download a single book
+# Download a single book (default: PDF)
 python scripts/download_book.py --title "超越百岁" --author "彼得·阿提亚"
 
-# Download using known file host URL
-python scripts/download_book.py --file-url "<file_host_url>" --title "超越百岁"
+# Download in EPUB format
+python scripts/download_book.py --title "超越百岁" --author "彼得·阿提亚" --format epub
 
 # Batch download from JSON
 python scripts/batch_download.py --book-list books.json --output-dir ~/Books/
+
+# Batch download EPUB format
+python scripts/batch_download.py --book-list books.json --output-dir ~/Books/ --format epub
 ```
 
 ## Download Sources (Priority Order)
@@ -117,6 +120,23 @@ with zipfile.ZipFile('book.zip', 'r') as z:
             with open(os.path.basename(name), 'wb') as f:
                 f.write(data)
 ```
+
+## Format Selection
+
+| Flag | Description |
+|------|-------------|
+| `--format pdf` | PDF only (default, preferred for NotebookLM and reading) |
+| `--format epub` | EPUB only |
+| `--format mobi` | MOBI only |
+| `--format azw3` | AZW3 only |
+| `--format any` | Accept any available format |
+
+When a specific format is requested:
+- Only matching files are extracted from ZIP archives
+- Multi-source fallback tries next source if current one doesn't have the format
+- On failure, reports which formats were available from each source
+
+Example failure message: `"No PDF available for this book. Sources returned: EPUB (primary), AZW3 (secondary)"`
 
 ## Batch Download
 
