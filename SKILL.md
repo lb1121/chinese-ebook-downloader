@@ -36,6 +36,21 @@ python scripts/batch_download.py --book-list books.json --output-dir ~/Books/
 | Source B (secondary library) | ~8% | None | Fallback for missing titles |
 | Source C (Z-Library) | Medium | 10/day | Last resort |
 
+### Book Name Matching Strategy
+
+When a book title is long or contains multiple book names (e.g. box sets), the script automatically extracts core keywords for smarter searching:
+
+- Removes subtitles (after "：" or ":")
+- Removes parenthetical content ("（...）", "(...)")
+- Removes "套装共X册" and similar bundle descriptions
+- Splits "+"-connected titles into individual books
+- Tries each extracted keyword in order until a match is found
+- Falls back to full title + author
+
+**Examples:**
+- "杨定一全部生命系列：真原医+静坐+好睡（套装3册）" → tries "真原医", "静坐", "好睡"
+- "超越百岁：长寿的科学与艺术" → tries "超越百岁", then "超越百岁 彼得·阿提亚"
+
 ## Workflow (Source A)
 
 ```

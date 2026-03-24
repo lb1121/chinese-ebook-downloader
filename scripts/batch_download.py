@@ -15,7 +15,11 @@ from pathlib import Path
 
 # Add parent dir to path for imports
 sys.path.insert(0, str(Path(__file__).parent))
-from search_secondary_source import search_secondary_source, decrypt_ctfile, get_download_url
+from search_secondary_source import search_yabook as search_secondary_source, decrypt_ctfile as decrypt_file_host, get_download_url
+
+def _import_download_book():
+    from download_book import download_book as download_from_primary, download_with_curl, verify_file, sanitize_filename, extract_zip
+    return download_from_primary, download_with_curl, verify_file, sanitize_filename, extract_zip
 
 
 def sanitize_filename(name: str) -> str:
@@ -72,52 +76,96 @@ def verify_file(filepath: str) -> bool:
     return any(t in output for t in valid_types) or size > 1024 * 1024  # >1MB is likely valid
 
 
+async def download_from_secondary(title: str, author: str, output_dir: str) -> dict:
+    """Try secondary book source. Returns {"status": "done"|"failed", ...}"""
+    try:
+        search_fn = search_secondary_source
+    except ImportError:
+        return {"status": "failed", "error": "Secondary source module not available"}
+
+    results = await search_fn(title, author)
+    if not results:
+        return {"status": "failed", "error": "No results on secondary source"}
+
+    best = results[0]
+    file_url = best.get('ctfile_url', best.get('file_url', ''))
+    password = best.get('password', '')
+    if not file_url:
+        return {"status": "failed", "error": "No download link found"}
+
+    api_vars = await decrypt_file_host(file_url, password)
+    if not api_vars:
+        return {"status": "failed", "error": "Could not decrypt file link (secondary)"}
+
+    downurl = await get_download_url(api_vars)
+    if not downurl:
+        return {"status": "failed", "error": "Could not get download URL (secondary)"}
+
+    print(f"  ⬇️  Downloading from secondary source...")
+    clean = sanitize_filename(f"{title} - {author}")
+    output_path = os.path.join(output_dir, f"{clean}.zip")
+    success = download_with_curl(downurl, output_path)
+    if not success:
+        return {"status": "failed", "error": "curl download failed (secondary)"}
+
+    # Try to extract ZIP
+    try:
+        extracted = extract_zip(output_path, output_dir)
+        os.remove(output_path)
+        # Find ebook files
+        ebook_exts = ('.pdf', '.epub', '.mobi', '.azw3')
+        ebook_files = [f for f in extracted if f.lower().endswith(ebook_exts)]
+        if ebook_files:
+            return {"status": "done", "files": ebook_files, "source": "secondary"}
+        return {"status": "done", "files": extracted, "source": "secondary"}
+    except Exception:
+        os.remove(output_path) if os.path.exists(output_path) else None
+        return {"status": "failed", "error": "ZIP extraction failed (secondary)"}
+
+
+async def download_from_tertiary(title: str, author: str, output_dir: str) -> dict:
+    """Tertiary source (online library with account). Stub - print info."""
+    print("  ℹ️  Tertiary source (account-based library) not yet integrated.")
+    return {"status": "failed", "error": "Tertiary source not configured"}
+
+
 async def download_book(title: str, author: str, output_dir: str) -> dict:
-    """Download a single book. Returns {"status": "done"|"failed", "error": "..."}"""
-    clean_title = sanitize_filename(f"{title} - {author}")
-    output_path = os.path.join(output_dir, f"{clean_title}.pdf")
-    
+    """Download a single book with multi-source fallback."""
+    clean_title = sanitize_filename(f"{title} - {author}" if author else title)
+
     # Check if already downloaded
-    if os.path.exists(output_path) and verify_file(output_path):
-        return {"status": "done", "message": "Already exists"}
-    
-    # Step 1: Search
+    for ext in ('.pdf', '.epub', '.mobi', '.azw3'):
+        p = os.path.join(output_dir, f"{clean_title}{ext}")
+        if os.path.exists(p) and os.path.getsize(p) > 1024:
+            return {"status": "done", "message": "Already exists"}
+
     print(f"\n{'='*60}")
     print(f"📚 {title} - {author}")
     print(f"{'='*60}")
-    
-    results = await search_secondary_source(title, author)
-    if not results:
-        return {"status": "failed", "error": "No results found"}
-    
-    best = results[0]
-    ctfile_url = best['ctfile_url']
-    password = best['password']
-    
-    # Step 2: Decrypt
-    api_vars = await decrypt_ctfile(ctfile_url, password)
-    if not api_vars:
-        return {"status": "failed", "error": "Could not decrypt download link"}
-    
-    # Step 3: Get download URL
-    downurl = await get_download_url(api_vars)
-    if not downurl:
-        return {"status": "failed", "error": "Could not get download URL"}
-    
-    # Step 4: Download
-    print(f"⬇️  Downloading...")
-    success = download_with_curl(downurl, output_path)
-    if not success:
-        return {"status": "failed", "error": "curl download failed"}
-    
-    # Step 5: Verify
-    if verify_file(output_path):
-        size_mb = os.path.getsize(output_path) / 1024 / 1024
-        print(f"✅ Downloaded: {output_path} ({size_mb:.1f} MB)")
-        return {"status": "done", "message": f"{size_mb:.1f} MB"}
-    else:
-        os.remove(output_path) if os.path.exists(output_path) else None
-        return {"status": "failed", "error": "File verification failed"}
+
+    # Source 1: Primary online library
+    try:
+        _dl = _import_download_book
+        download_from_primary = _dl()[0]
+        print(f"  🔍 Trying primary source...")
+        result = await download_from_primary(title=title, author=author, output_dir=output_dir)
+        if result.get('status') == 'done':
+            result["source"] = "primary"
+            return result
+        print(f"  ❌ Primary failed: {result.get('error', '?')}")
+    except Exception as e:
+        print(f"  ❌ Primary source error: {e}")
+
+    # Source 2: Secondary source
+    print(f"  🔍 Trying secondary source...")
+    result = await download_from_secondary(title, author, output_dir)
+    if result.get('status') == 'done':
+        return result
+    print(f"  ❌ Secondary failed: {result.get('error', '?')}")
+
+    # Source 3: Tertiary source
+    result = await download_from_tertiary(title, author, output_dir)
+    return result
 
 
 async def main():
@@ -154,6 +202,9 @@ async def main():
             print(f"⏭️  Skipping (already done): {title}")
             stats['skipped'] += 1
             continue
+        
+        # Skip previously failed (will retry)
+        # Allow retry for 'failed' and 'retry' status
         
         result = await download_book(title, author, args.output_dir)
         

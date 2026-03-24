@@ -8,7 +8,7 @@ import os
 import re
 import json
 import asyncio
-from typing import Optional
+from typing import Optional, List
 from urllib.parse import quote, urljoin
 
 try:
@@ -21,7 +21,7 @@ SOURCE_B_BASE_URL = os.environ.get("SOURCE_B_BASE_URL", "https://yabook.org")
 FILE_HOST_BASE_URL = os.environ.get("FILE_HOST_BASE_URL", "https://z701.com")
 
 
-async def search_yabook(title: str, author: str = "", headless: bool = True) -> list[dict]:
+async def search_yabook(title: str, author: str = "", headless: bool = True) -> List[dict]:
     """Search secondary book source and return results with file host links."""
     query = f"{title} {author}".strip()
     results = []

@@ -30,7 +30,7 @@ import tempfile
 import shutil
 from pathlib import Path
 from urllib.parse import quote, urljoin
-from typing import Optional
+from typing import Optional, List, Tuple, Dict
 
 try:
     from playwright.async_api import async_playwright
@@ -46,6 +46,41 @@ DOWNLOAD_TIMEOUT = 1200  # 20 minutes for large files
 WAIT_SECONDS = 60  # File host requires 60 second wait
 
 
+def extract_search_queries(title: str, author: str = "") -> List[str]:
+    """Extract multiple search keyword combinations from a long book title."""
+    queries = []
+
+    # Clean: remove parenthetical content
+    clean = re.sub(r'[（(].+?[）)]', '', title).strip()
+    # Remove trailing 套装 descriptions
+    clean = re.sub(r'（套装.*$', '', clean).strip()
+    clean = re.sub(r'套装共.*$', '', clean).strip()
+
+    # Main title (before colon)
+    main = clean.split('：')[0].split(':')[0].strip()
+    if main:
+        queries.append(main)
+
+    # Split bundled books by '+'
+    if '+' in clean:
+        parts = clean.split('+')
+        for p in parts:
+            p = p.strip()
+            # Further clean each part
+            p = re.sub(r'[（(].+?[）)]', '', p).strip()
+            p = p.split('：')[0].split(':')[0].strip()
+            if len(p) > 1:
+                queries.append(p)
+
+    # Author + main title
+    if author and main and main != title:
+        clean_author = author.split('[')[0].split('（')[0].strip()
+        if clean_author:
+            queries.append(f"{main} {clean_author}")
+
+    return queries or [title]
+
+
 def sanitize_filename(name: str) -> str:
     """Clean filename for filesystem."""
     name = re.sub(r'[\[\]【】（）()《》]', '', name)
@@ -55,34 +90,43 @@ def sanitize_filename(name: str) -> str:
     return name[:200]
 
 
-async def search_primary_source(title: str, author: str = "", headless: bool = True) -> list[dict]:
+async def search_primary_source(title: str, author: str = "", headless: bool = True) -> List[dict]:
     """
     Search primary book source and return results with file host links.
 
+    For long titles, automatically extracts multiple search queries.
     Returns list of dicts with: title, id, file_url, pwd
     """
-    query = f"{title} {author}".strip()
+    queries = extract_search_queries(title, author)
+    # Always include full title+author as fallback
+    full_query = f"{title} {author}".strip()
+    if full_query not in queries:
+        queries.append(full_query)
+
     results = []
 
-    async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=headless)
-        page = await browser.new_page()
+    for qi, query in enumerate(queries):
+        tag = f"(query {qi+1}/{len(queries)})" if len(queries) > 1 else ""
+        print(f"  🔍 Searching primary source {tag}: {query}")
 
-        # Search
-        search_url = f"{SOURCE_A_BASE_URL}/?s={quote(query)}"
-        print(f"Searching primary source for: {query}")
-        await page.goto(search_url, wait_until='domcontentloaded', timeout=30000)
-        await asyncio.sleep(2)
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(headless=headless)
+            page = await browser.new_page()
+
+            search_url = f"{SOURCE_A_BASE_URL}/?s={quote(query)}"
+            await page.goto(search_url, wait_until='domcontentloaded', timeout=30000)
+            await asyncio.sleep(2)
 
         # Get search results
         items = await page.query_selector_all('article a, .post-title a, h2 a, .entry-title a')
 
         if not items:
-            print("No search results found")
+            print(f"    No results for: {query[:30]}...")
             await browser.close()
-            return []
+            continue
 
         # Check first 5 results
+        found = False
         for item in items[:5]:
             try:
                 item_title = (await item.inner_text()).strip()
@@ -103,7 +147,7 @@ async def search_primary_source(title: str, author: str = "", headless: bool = T
                     id_match = re.search(r'/post/(\d+)', full_url)
                 book_id = id_match.group(1) if id_match else ""
 
-                print(f"  Checking: {item_title[:50]}...")
+                print(f"    Checking: {item_title[:50]}...")
                 await page.goto(full_url, wait_until='domcontentloaded', timeout=20000)
                 await asyncio.sleep(2)
 
@@ -111,24 +155,31 @@ async def search_primary_source(title: str, author: str = "", headless: bool = T
                 ctfile_url, pwd = await _extract_file_host_link(page, book_id)
 
                 if ctfile_url:
-                    print(f"  Found file host link (password: {pwd})")
+                    print(f"    ✅ Found file host link (password: {pwd})")
                     results.append({
                         "title": item_title,
                         "id": book_id,
                         "ctfile_url": ctfile_url,
                         "pwd": pwd
                     })
+                    found = True
                     break  # Use first match
             except Exception as e:
-                print(f"  Warning: {e}")
+                print(f"    Warning: {e}")
                 continue
 
         await browser.close()
 
+        if found:
+            break  # Stop trying more queries
+
+    if not results:
+        print(f"  ❌ No results found across all queries")
+
     return results
 
 
-async def _extract_file_host_link(page, book_id: str) -> tuple[str, str]:
+async def _extract_file_host_link(page, book_id: str) -> Tuple[str, str]:
     """
     Extract file host link from book page.
     May need to navigate to download-book-{id}.html first.
