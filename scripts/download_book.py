@@ -58,25 +58,37 @@ def extract_search_queries(title: str, author: str = "") -> List[str]:
 
     # Main title (before colon)
     main = clean.split('：')[0].split(':')[0].strip()
-    if main:
-        queries.append(main)
 
-    # Split bundled books by '+'
+    # Split bundled books by '+' — these are likely individual searchable titles
     if '+' in clean:
         parts = clean.split('+')
-        for p in parts:
+        for idx, p in enumerate(parts):
             p = p.strip()
-            # Further clean each part
             p = re.sub(r'[（(].+?[）)]', '', p).strip()
+            # For first part, also try content after colon (the actual book name in series)
+            if idx == 0 and '：' in p:
+                after_colon = p.split('：')[-1].strip()
+                if after_colon and len(after_colon) > 1:
+                    queries.append(after_colon)
             p = p.split('：')[0].split(':')[0].strip()
+            # Remove series prefixes for better matching
+            short = re.sub(r'(系列|丛书|集)$', '', p).strip()
+            if short and short != p:
+                queries.append(short)
             if len(p) > 1:
                 queries.append(p)
 
+    # Add main title if different from the individual parts
+    if main and main not in queries:
+        queries.append(main)
+
     # Author + main title
-    if author and main and main != title:
+    if author and main:
         clean_author = author.split('[')[0].split('（')[0].strip()
         if clean_author:
-            queries.append(f"{main} {clean_author}")
+            combined = f"{main} {clean_author}"
+            if combined not in queries:
+                queries.append(combined)
 
     return queries or [title]
 
